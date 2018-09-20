@@ -253,10 +253,13 @@ public class TestHelper {
             properties.put(keyValues[i].toString(), keyValues[i + 1]);
         }
 
+        ServiceRegistration<Object> serviceRegistration;
+
         if (singleton) {
-            return bundleContext.registerService(
+             serviceRegistration = bundleContext.registerService(
                 Object.class, new TestAddonLifecycle(), properties);
-        } else {
+        }
+        else {
             PrototypeServiceFactory<Object> prototypeServiceFactory =
                 new PrototypeServiceFactory<Object>() {
                     @Override
@@ -275,15 +278,15 @@ public class TestHelper {
                     }
                 };
 
-            ServiceRegistration<Object> serviceRegistration =
+            serviceRegistration =
                 bundleContext.registerService(
                     Object.class, (ServiceFactory<?>) prototypeServiceFactory,
                     properties);
-
-            _registrations.add(serviceRegistration);
-
-            return serviceRegistration;
         }
+
+        _registrations.add(serviceRegistration);
+
+        return serviceRegistration;
     }
 
     protected ServiceRegistration<Application> registerApplication(

@@ -19,9 +19,12 @@ package org.apache.aries.jax.rs.whiteboard.internal;
 
 import static org.osgi.service.jaxrs.whiteboard.JaxrsWhiteboardConstants.JAX_RS_WHITEBOARD_TARGET;
 
+import java.util.Dictionary;
+import java.util.Map;
 import java.util.function.Predicate;
 
 import org.apache.aries.component.dsl.CachingServiceReference;
+import org.apache.aries.jax.rs.whiteboard.internal.utils.PropertyHolder;
 import org.osgi.framework.Filter;
 import org.osgi.framework.FrameworkUtil;
 import org.osgi.framework.InvalidSyntaxException;
@@ -31,8 +34,8 @@ import org.slf4j.LoggerFactory;
 
 public class TargetFilter<T> implements Predicate<CachingServiceReference<T>>  {
 
-    public TargetFilter(ServiceReference<?> serviceRuntimeReference) {
-        _serviceRuntimeReference = serviceRuntimeReference;
+    public TargetFilter(Map<String, ?> configuration) {
+        _configuration = configuration;
     }
 
     @Override
@@ -56,11 +59,10 @@ public class TargetFilter<T> implements Predicate<CachingServiceReference<T>>  {
             return false;
         }
 
-        return filter.match(_serviceRuntimeReference);
+        return filter.matches(_configuration);
     }
 
     private static final Logger _log = LoggerFactory.getLogger(TargetFilter.class);
-
-    private final ServiceReference<?> _serviceRuntimeReference;
+    private final Map<String, ?> _configuration;
 
 }
