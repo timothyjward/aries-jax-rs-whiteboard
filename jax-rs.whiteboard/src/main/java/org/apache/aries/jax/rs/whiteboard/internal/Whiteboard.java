@@ -77,8 +77,10 @@ import static org.apache.aries.jax.rs.whiteboard.internal.AriesJaxrsServiceRunti
 import static org.apache.aries.jax.rs.whiteboard.internal.utils.LogUtils.ifDebugEnabled;
 import static org.apache.aries.jax.rs.whiteboard.internal.utils.LogUtils.ifErrorEnabled;
 import static org.apache.aries.jax.rs.whiteboard.internal.utils.Utils.canonicalize;
+import static org.apache.aries.jax.rs.whiteboard.internal.utils.Utils.canonicalizeAddress;
 import static org.apache.aries.jax.rs.whiteboard.internal.utils.Utils.generateApplicationName;
 import static org.apache.aries.jax.rs.whiteboard.internal.utils.Utils.getProperties;
+import static org.apache.aries.jax.rs.whiteboard.internal.utils.Utils.getString;
 import static org.apache.aries.jax.rs.whiteboard.internal.utils.Utils.highestPer;
 import static org.apache.aries.jax.rs.whiteboard.internal.utils.Utils.mergePropertyMaps;
 import static org.apache.aries.jax.rs.whiteboard.internal.utils.Utils.onlyGettables;
@@ -141,32 +143,29 @@ public class Whiteboard {
 
     private static final Logger _log = LoggerFactory.getLogger(
         Whiteboard.class);
+    private final String _applicationBasePrefix;
     private final ApplicationExtensionRegistry _applicationExtensionRegistry;
     private final ExtensionRegistry _extensionRegistry;
 
     private final AriesJaxrsServiceRuntime _runtime;
     private final Map<String, ?> _configurationMap;
-    private final BundleContext _bundleContext;
-    private final ServiceRegistrationChangeCounter _counter;
-    private final ServiceReference<?> _runtimeReference;
+    private volatile BundleContext _bundleContext;
+    private volatile ServiceRegistrationChangeCounter _counter;
+    private volatile ServiceReference<?> _runtimeReference;
     private final OSGi<Void> _program;
     private final List<Object> _endpoints;
-    private final ServiceRegistration<?> _runtimeRegistration;
+    private volatile ServiceRegistration<?> _runtimeRegistration;
     private OSGiResult _osgiResult;
 
-    private Whiteboard(
-        BundleContext bundleContext, Dictionary<String, ?> configuration) {
-
-        _bundleContext = bundleContext;
-        _runtime = new AriesJaxrsServiceRuntime();
+    private Whiteboard(Dictionary<String, ?> configuration) {
+        _runtime = new AriesJaxrsServiceRuntime(this);
         _configurationMap = Maps.from(configuration);
         _endpoints = new ArrayList<>();
-        _runtimeRegistration = registerJaxRSServiceRuntime(
-            new HashMap<>(_configurationMap));
-        _runtimeReference = _runtimeRegistration.getReference();
-        _counter = new ServiceRegistrationChangeCounter(_runtimeRegistration);
+
         _applicationExtensionRegistry = new ApplicationExtensionRegistry();
         _extensionRegistry = new ExtensionRegistry();
+        _applicationBasePrefix = canonicalizeAddress(
+            getString(_configurationMap.get("application.base.prefix")));
 
         _program =
             all(
@@ -176,13 +175,18 @@ public class Whiteboard {
     }
 
     public static Whiteboard createWhiteboard(
-        BundleContext bundleContext, Dictionary<String, ?> configuration) {
+        Dictionary<String, ?> configuration) {
 
-        return new Whiteboard(bundleContext, configuration);
+        return new Whiteboard(configuration);
     }
 
-    public void start() {
-        _osgiResult = _program.run(_bundleContext);
+    public void start(BundleContext bundleContext) {
+        _bundleContext = bundleContext;
+        _runtimeRegistration = registerJaxRSServiceRuntime(
+            new HashMap<>(_configurationMap));
+        _runtimeReference = _runtimeRegistration.getReference();
+        _counter = new ServiceRegistrationChangeCounter(_runtimeRegistration);
+        _osgiResult = _program.run(bundleContext);
     }
 
     public void stop() {
@@ -264,8 +268,7 @@ public class Whiteboard {
                         getResourcesForWhiteboard(),
                         getApplicationExtensionsForWhiteboard(),
                         applicationsForWhiteboard
-                    ),
-                    _counter
+                    )
                 ),
                 this::registerShadowedService,
                 this::unregisterShadowedService
@@ -291,6 +294,31 @@ public class Whiteboard {
 
     private boolean isResource(CachingServiceReference<?> sr) {
         return _resourcesFilter.match(sr.getServiceReference());
+    }
+
+    private <T> boolean matchesWhiteboard(CachingServiceReference<T> ref) {
+        String target = (String)ref.getProperty(JAX_RS_WHITEBOARD_TARGET);
+
+        if (target == null) {
+            return true;
+        }
+
+        Filter filter;
+
+        try {
+            filter = FrameworkUtil.createFilter(target);
+        }
+        catch (InvalidSyntaxException ise) {
+            if (_log.isErrorEnabled()) {
+                _log.error(
+                    "Invalid '{}' filter syntax in {}",
+                    JAX_RS_WHITEBOARD_TARGET, ref);
+            }
+
+            return false;
+        }
+
+        return filter.match(_runtimeReference);
     }
 
     private void registerShadowedService(CachingServiceReference<?> sr) {
@@ -570,9 +598,7 @@ public class Whiteboard {
                 serviceReferences(
                     CxfJaxrsServiceRegistrator.class,
                     String.format("(%s=%s)", JAX_RS_NAME, DEFAULT_NAME)
-                ).filter(
-                    new TargetFilter<>(_runtimeReference)
-                )
+                ).filter(this::matchesWhiteboard)
             );
     }
 
@@ -644,9 +670,7 @@ public class Whiteboard {
                             }
                         }
                     }
-                ).filter(
-                    new TargetFilter<>(_runtimeReference)
-                ),
+                ).filter(this::matchesWhiteboard),
                 __ -> {}, __ -> {}, _log);
 
         return accumulateInMap(
@@ -684,7 +708,7 @@ public class Whiteboard {
         getApplicationExtensionsForWhiteboard() {
 
         return serviceReferences(_extensionsFilter.toString()).
-            filter(new TargetFilter<>(_runtimeReference));
+            filter(this::matchesWhiteboard);
     }
 
     private OSGi<CachingServiceReference<Application>>
@@ -693,12 +717,12 @@ public class Whiteboard {
         return
             serviceReferences(
                     Application.class, _applicationsFilter.toString()).
-                filter(new TargetFilter<>(_runtimeReference));
+                filter(this::matchesWhiteboard);
     }
 
     private OSGi<CachingServiceReference<Object>> getResourcesForWhiteboard() {
         return serviceReferences(_resourcesFilter.toString()).
-            filter(new TargetFilter<>(_runtimeReference));
+            filter(this::matchesWhiteboard);
     }
 
     private OSGi<ServiceRegistration<Application>>
@@ -1093,8 +1117,9 @@ public class Whiteboard {
         return program;
     }
 
-    static String getApplicationBase(PropertyHolder properties) {
-        return properties.get(JAX_RS_APPLICATION_BASE).toString();
+    String getApplicationBase(PropertyHolder properties) {
+        return _applicationBasePrefix + getString(
+            properties.get(JAX_RS_APPLICATION_BASE));
     }
 
     private static OSGi<CachingServiceReference<CxfJaxrsServiceRegistrator>>
@@ -1144,14 +1169,13 @@ public class Whiteboard {
             ));
     }
 
-    private static <T> OSGi<T> countChanges(
-        OSGi<T> program, ChangeCounter counter) {
+    private <T> OSGi<T> countChanges(OSGi<T> program) {
 
         return program.effects(
             __ -> {},
-            __ -> counter.inc(),
+            __ -> _counter.inc(),
             __ -> {},
-            __ -> counter.inc()
+            __ -> _counter.inc()
         );
     }
 
@@ -1194,17 +1218,8 @@ public class Whiteboard {
 
         Map<String, ?> serviceProperties = servicePropertiesSup.get();
 
-        String address = getApplicationBase(serviceProperties::get);
-
-        if (!address.startsWith("/")) {
-            address = "/" + address;
-        }
-
-        if (address.endsWith("/")) {
-            address = address.substring(0, address.length() - 1);
-        }
-
-        String finalAddress = address;
+        String address = canonicalizeAddress(
+            getApplicationBase(serviceProperties::get));
 
         String applicationName = getServiceName(serviceProperties::get);
 
@@ -1225,7 +1240,7 @@ public class Whiteboard {
 
                 String contextName;
 
-                if ("".equals(finalAddress)) {
+                if ("".equals(address)) {
                     contextName = HTTP_WHITEBOARD_DEFAULT_CONTEXT_NAME;
                 } else {
                     contextName = "context.for" + applicationName;
@@ -1234,7 +1249,7 @@ public class Whiteboard {
                 contextProperties.put(
                     HTTP_WHITEBOARD_CONTEXT_NAME, contextName);
                 contextProperties.put(
-                    HTTP_WHITEBOARD_CONTEXT_PATH, finalAddress);
+                    HTTP_WHITEBOARD_CONTEXT_PATH, address);
 
                 return contextProperties;
             };
@@ -1277,8 +1292,7 @@ public class Whiteboard {
             }
             else {
                 servletProperties.put(
-                    HTTP_WHITEBOARD_SERVLET_PATTERN,
-                    finalAddress + "/*");
+                    HTTP_WHITEBOARD_SERVLET_PATTERN, address + "/*");
             }
             servletProperties.put(
                 HTTP_WHITEBOARD_SERVLET_ASYNC_SUPPORTED, true);
@@ -1372,7 +1386,7 @@ public class Whiteboard {
         }
     }
 
-    private static class ApplicationReferenceWithContext
+    private class ApplicationReferenceWithContext
         implements Comparable<ApplicationReferenceWithContext> {
 
         @Override
